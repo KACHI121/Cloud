@@ -3,3 +3,6 @@ __pycache__
 .pytest_cache
 students.db
 .git
+*.pdf
+*.pptx
+create_presentation.py

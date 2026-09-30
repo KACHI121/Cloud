@@ -1,6 +1,6 @@
 # CampusHub Student CRUD
 
-A small Flask and SQLite web application for demonstrating Create, Read, Update, and Delete operations in a cloud application development presentation.
+A small Flask web application for demonstrating Create, Read, Update, and Delete operations in a cloud application development presentation. It uses SQLite locally and PostgreSQL when `DATABASE_URL` is set.
 
 ## 1. Run locally
 
@@ -91,7 +91,7 @@ sudo lsof -i :5000
 3. Use **Delete** to remove a record.
 4. Use the search box to find students.
 
-The SQLite database is created automatically as `students.db` when the application starts.
+The local SQLite database is created automatically as `students.db` when the application starts. A cloud PostgreSQL database starts with an empty student list.
 
 ## 6. Presentation workflow
 
@@ -107,3 +107,30 @@ The main files are:
 - `test_app.py` — automated tests
 - `Dockerfile` — container build instructions
 - `requirements.txt` — Python dependencies
+
+## 7. Deploy with Neon PostgreSQL and Render
+
+1. Go to [Neon](https://console.neon.tech/), create a project, and choose a region near your Render service. On the project dashboard, use **Connect** to copy the PostgreSQL connection string. Keep the full string, including `sslmode=require`, private.
+2. Push the current application changes to the GitHub repository. This project already has an `origin` remote; check it with `git remote -v`. From `~/Cloud`, use:
+
+   ```bash
+   git add app.py test_app.py requirements.txt Dockerfile gunicorn.conf.py .dockerignore README.md
+   git commit -m "Prepare student app for PostgreSQL and Render"
+   git push origin main
+   ```
+
+3. At [Render](https://dashboard.render.com/), choose **New → Web Service**, select the GitHub repository, choose the `main` branch, and set **Language** to **Docker**. Leave the Dockerfile path as `./Dockerfile`. Choose a plan that fits your demo; **Free** works for a classroom presentation.
+4. In Render's environment settings, add:
+
+   | Key | Value |
+   | --- | --- |
+   | `DATABASE_URL` | The full Neon connection string from step 1 |
+   | `SECRET_KEY` | A long random value from `python3 -c 'import secrets; print(secrets.token_hex(32))'` |
+
+   Do not put either value in a committed file. The application accepts Neon's normal `postgresql://...` URL and converts it internally for the installed PostgreSQL driver.
+5. Set the Render health check path to `/health` if the option is shown, then create the web service. Render builds the Docker image and starts Gunicorn. No custom build or start command is needed.
+6. After Render reports **Live**, open the assigned `https://...onrender.com` URL. Add a student, refresh the page, edit the student, then delete it. Use Render's **Logs** tab if the service does not start.
+
+The `students` table is created automatically on first startup. Existing data in the local `students.db` file is **not** copied to Neon. For a demo, add fresh student records through the website.
+
+Render's free web service sleeps after 15 minutes of inactivity, so open the site shortly before presenting. Student records stay in Neon while the service sleeps. This app has no login; anyone who has the public URL can edit or delete its demo records, so use fictional student details only.

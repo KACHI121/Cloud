@@ -1,115 +1,110 @@
 import os
-import sqlite3
 from pathlib import Path
 
-from flask import Flask, flash, g, redirect, render_template, request, url_for
-
+from flask import Flask, flash, redirect, render_template, request, url_for
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import CheckConstraint, or_
+from sqlalchemy.exc import IntegrityError
 
 BASE_DIR = Path(__file__).resolve().parent
-DATABASE = Path(os.environ.get("DATABASE_PATH", BASE_DIR / "students.db"))
-
-app = Flask(__name__)
-app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret-key")
+db = SQLAlchemy()
 
 
-def get_db():
-    if "db" not in g:
-        g.db = sqlite3.connect(DATABASE)
-        g.db.row_factory = sqlite3.Row
-    return g.db
+class Student(db.Model):
+    __tablename__ = "students"
+    __table_args__ = (CheckConstraint("year BETWEEN 1 AND 6", name="valid_year"),)
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(200), nullable=False)
+    email = db.Column(db.String(255), unique=True, nullable=False)
+    course = db.Column(db.String(200), nullable=False)
+    year = db.Column(db.Integer, nullable=False)
+    created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
 
 
-def init_db():
-    db = get_db()
-    db.execute(
-        """CREATE TABLE IF NOT EXISTS students (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            email TEXT NOT NULL UNIQUE,
-            course TEXT NOT NULL,
-            year INTEGER NOT NULL CHECK(year BETWEEN 1 AND 6),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )"""
+def database_uri(value):
+    if value.startswith("postgres://"):
+        return value.replace("postgres://", "postgresql+psycopg://", 1)
+    if value.startswith("postgresql://"):
+        return value.replace("postgresql://", "postgresql+psycopg://", 1)
+    return value
+
+
+def create_app(database_url=None):
+    app = Flask(__name__)
+    app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY") or os.urandom(32)
+    app.config["SQLALCHEMY_DATABASE_URI"] = database_uri(
+        database_url or os.environ.get("DATABASE_URL") or f"sqlite:///{BASE_DIR / 'students.db'}"
     )
-    db.commit()
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    db.init_app(app)
 
+    with app.app_context():
+        db.create_all()
 
-@app.teardown_appcontext
-def close_db(_error=None):
-    db = g.pop("db", None)
-    if db is not None:
-        db.close()
+    @app.get("/")
+    def index():
+        search = request.args.get("search", "").strip()
+        query = db.select(Student)
+        if search:
+            term = f"%{search}%"
+            query = query.where(or_(Student.name.ilike(term), Student.email.ilike(term), Student.course.ilike(term)))
+        students = db.session.execute(query.order_by(Student.id.desc())).scalars().all()
+        return render_template("index.html", students=students, search=search)
 
+    @app.route("/students/new", methods=("GET", "POST"))
+    def create_student():
+        if request.method == "POST":
+            data = student_form_data()
+            error = validate_student(data)
+            if error:
+                flash(error, "error")
+            else:
+                try:
+                    db.session.add(Student(**data))
+                    db.session.commit()
+                    flash("Student added successfully.", "success")
+                    return redirect(url_for("index"))
+                except IntegrityError:
+                    db.session.rollback()
+                    flash("That email address is already registered.", "error")
+        return render_template("student_form.html", student=None, form_title="Add student")
 
-@app.route("/")
-def index():
-    search = request.args.get("search", "").strip()
-    query = "SELECT * FROM students"
-    params = []
-    if search:
-        query += " WHERE name LIKE ? OR email LIKE ? OR course LIKE ?"
-        value = f"%{search}%"
-        params = [value, value, value]
-    query += " ORDER BY id DESC"
-    students = get_db().execute(query, params).fetchall()
-    return render_template("index.html", students=students, search=search)
+    @app.route("/students/<int:student_id>/edit", methods=("GET", "POST"))
+    def edit_student(student_id):
+        student = db.get_or_404(Student, student_id)
+        if request.method == "POST":
+            data = student_form_data()
+            error = validate_student(data)
+            if error:
+                flash(error, "error")
+            else:
+                try:
+                    for key, value in data.items():
+                        setattr(student, key, value)
+                    db.session.commit()
+                    flash("Student updated successfully.", "success")
+                    return redirect(url_for("index"))
+                except IntegrityError:
+                    db.session.rollback()
+                    flash("That email address is already registered.", "error")
+            student = data
+        return render_template("student_form.html", student=student, form_title="Edit student")
 
+    @app.post("/students/<int:student_id>/delete")
+    def delete_student(student_id):
+        student = db.get_or_404(Student, student_id)
+        db.session.delete(student)
+        db.session.commit()
+        flash("Student deleted.", "success")
+        return redirect(url_for("index"))
 
-@app.route("/students/new", methods=("GET", "POST"))
-def create_student():
-    if request.method == "POST":
-        data = student_form_data()
-        error = validate_student(data)
-        if error:
-            flash(error, "error")
-        else:
-            try:
-                db = get_db()
-                db.execute(
-                    "INSERT INTO students (name, email, course, year) VALUES (?, ?, ?, ?)",
-                    (data["name"], data["email"], data["course"], data["year"]),
-                )
-                db.commit()
-                flash("Student added successfully.", "success")
-                return redirect(url_for("index"))
-            except sqlite3.IntegrityError:
-                flash("That email address is already registered.", "error")
-    return render_template("student_form.html", student=None, form_title="Add student")
+    @app.get("/health")
+    def health():
+        db.session.execute(db.select(1)).scalar()
+        return "ok", 200
 
-
-@app.route("/students/<int:student_id>/edit", methods=("GET", "POST"))
-def edit_student(student_id):
-    student = get_db().execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone()
-    if student is None:
-        return "Student not found", 404
-    if request.method == "POST":
-        data = student_form_data()
-        error = validate_student(data)
-        if error:
-            flash(error, "error")
-        else:
-            try:
-                db = get_db()
-                db.execute(
-                    "UPDATE students SET name = ?, email = ?, course = ?, year = ? WHERE id = ?",
-                    (data["name"], data["email"], data["course"], data["year"], student_id),
-                )
-                db.commit()
-                flash("Student updated successfully.", "success")
-                return redirect(url_for("index"))
-            except sqlite3.IntegrityError:
-                flash("That email address is already registered.", "error")
-        student = {**dict(student), **data}
-    return render_template("student_form.html", student=student, form_title="Edit student")
-
-
-@app.post("/students/<int:student_id>/delete")
-def delete_student(student_id):
-    db = get_db()
-    db.execute("DELETE FROM students WHERE id = ?", (student_id,))
-    db.commit()
-    flash("Student deleted.", "success")
-    return redirect(url_for("index"))
+    return app
 
 
 def student_form_data():
@@ -136,9 +131,7 @@ def validate_student(data):
     return None
 
 
-with app.app_context():
-    init_db()
-
+app = create_app()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=True)

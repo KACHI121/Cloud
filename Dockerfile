@@ -7,4 +7,4 @@ COPY . .
 
 ENV PORT=5000
 EXPOSE 5000
-CMD ["python", "app.py"]
+CMD ["gunicorn", "-c", "gunicorn.conf.py", "app:app"]
